@@ -1,0 +1,9 @@
+curl -X POST http://localhost:8000/v2/models/exaone4_5_awq/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+        "text_input": "Explain why EXAONE 4.5 needs so much memory.",
+        "parameters": {
+          "stream": false,
+          "return_reasoning": true,
+              }
+      }'
