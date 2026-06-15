@@ -112,9 +112,7 @@ container with the following commands:
 
 ```
 mkdir -p /opt/tritonserver/backends/vllm
-git clone https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend
-# exaon4.5
-git clone https://github.com/doxgxxn/vllm_backend.git /tmp/vllm_backend
+git clone  https://github.com/doxgxxn/exaone45awq.git /tmp/vllm_backend
 cp -r /tmp/vllm_backend/src/* /opt/tritonserver/backends/vllm
 ```
 
