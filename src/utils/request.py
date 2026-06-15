@@ -44,7 +44,10 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
-from utils.vllm_backend_utils import TritonSamplingParams
+from utils.vllm_backend_utils import (
+    TritonSamplingParams,
+    coerce_parameters_payload,
+)
 
 
 class RequestBase:
@@ -142,9 +145,16 @@ class GenerateRequest(RequestBase):
             self.triton_request, "sampling_parameters"
         )
         if sampling_parameters:
-            parameters = sampling_parameters.as_numpy()[0].decode("utf-8")
+            parameters_payload = sampling_parameters.as_numpy()[0]
         else:
-            parameters = self.triton_request.parameters()
+            parameters_payload = self.triton_request.parameters()
+
+        parameters_dict = coerce_parameters_payload(parameters_payload, self.logger)
+        sampling_parameters_dict = parameters_dict
+        if "sampling_parameters" in parameters_dict:
+            sampling_parameters_dict = coerce_parameters_payload(
+                parameters_dict["sampling_parameters"], self.logger
+            )
 
         # additional outputs
         additional_outputs = {
@@ -153,6 +163,7 @@ class GenerateRequest(RequestBase):
             "return_logprobs": None,
             "return_num_input_tokens": None,
             "return_num_output_tokens": None,
+            "return_reasoning": None,
         }
         for tensor_name in additional_outputs.keys():
             tensor = pb_utils.get_input_tensor_by_name(self.triton_request, tensor_name)
@@ -162,18 +173,47 @@ class GenerateRequest(RequestBase):
                 tensor = False
             additional_outputs[tensor_name] = tensor
 
-        return prompt, stream, prepend_input, parameters, additional_outputs
+        if not additional_outputs["return_reasoning"]:
+            requested_reasoning = parameters_dict.get("return_reasoning")
+            if requested_reasoning is None:
+                requested_reasoning = sampling_parameters_dict.get("return_reasoning")
+            if requested_reasoning is not None:
+                if isinstance(requested_reasoning, str):
+                    additional_outputs["return_reasoning"] = (
+                        requested_reasoning.strip().lower() in ("1", "true", "yes", "on")
+                    )
+                else:
+                    additional_outputs["return_reasoning"] = bool(requested_reasoning)
+
+        return (
+            prompt,
+            stream,
+            prepend_input,
+            parameters_payload,
+            additional_outputs,
+        )
 
     async def execute(self):
         (
             prompt,
             self.stream,
             self.prepend_input,
-            parameters,
+            parameters_payload,
             self.additional_outputs,
         ) = self._get_input_tensors()
 
-        sampling_params = TritonSamplingParams.from_dict(parameters, self.logger)
+        sampling_params = TritonSamplingParams.from_dict(
+            parameters_payload, self.logger
+        )
+        if self.additional_outputs.get("return_reasoning") and (
+            sampling_params.return_reasoning is None
+        ):
+            sampling_params.return_reasoning = True
+        elif sampling_params.return_reasoning is not None:
+            self.additional_outputs["return_reasoning"] = bool(
+                sampling_params.return_reasoning
+            )
+
         lora_name = sampling_params.lora_name
         lora_request = None
         if lora_name is not None:
@@ -220,11 +260,16 @@ class GenerateRequest(RequestBase):
             )
         )
 
-        # Added: reasoning_output passthrough (if available)
-        reasoning_texts = [
-            getattr(output, "reasoning_output", None) for output in request_output.outputs
-        ]
-        if any(reasoning_texts):
+        if self.additional_outputs.get("return_reasoning"):
+            reasoning_texts = []
+            for output in request_output.outputs:
+                reasoning_payload = getattr(output, "reasoning_output", None)
+                if reasoning_payload is None:
+                    reasoning_texts.append(b"")
+                elif isinstance(reasoning_payload, (dict, list)):
+                    reasoning_texts.append(json.dumps(reasoning_payload).encode("utf-8"))
+                else:
+                    reasoning_texts.append(str(reasoning_payload).encode("utf-8"))
             output_tensors.append(
                 pb_utils.Tensor(
                     "reasoning_output",

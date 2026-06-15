@@ -27,13 +27,49 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, Optional, Union
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+try:
+    from vllm.sampling_params import (
+        ReasoningParams,
+        SamplingParams,
+        StructuredOutputsParams,
+    )
+except ImportError:  # pragma: no cover - older vLLM versions
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams  # type: ignore
+    ReasoningParams = None  # type: ignore
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.metrics.loggers import StatLoggerFactory
+
+
+def coerce_parameters_payload(
+    payload: Any, logger: "pb_utils.Logger | None" = None
+) -> Dict[str, Any]:
+    if payload is None:
+        return {}
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8")
+    if isinstance(payload, str):
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            if logger is not None:
+                logger.log_warn(
+                    "[vllm] Received sampling parameters that could not be parsed as JSON."
+                )
+            return {}
+    if isinstance(payload, dict):
+        return dict(payload)
+    if hasattr(payload, "items"):
+        return dict(payload.items())
+    if logger is not None:
+        logger.log_warn(
+            f"[vllm] Unsupported sampling parameter payload type: {type(payload)}. "
+            "Using default sampling parameters."
+        )
+    return {}
 
 
 class TritonSamplingParams(SamplingParams):
@@ -44,9 +80,11 @@ class TritonSamplingParams(SamplingParams):
     Attributes:
         lora_name (Optional[str]): The name of the LoRA (Low-Rank Adaptation)
         to use for inference.
+        return_reasoning (Optional[bool]): Whether reasoning tokens should be returned.
     """
 
     lora_name: Optional[str] = None
+    return_reasoning: Optional[bool] = None
 
     def __repr__(self) -> str:
         """
@@ -59,51 +97,101 @@ class TritonSamplingParams(SamplingParams):
             A string representation of the object.
         """
         base = super().__repr__()
-        return f"{base}, lora_name={self.lora_name}"
+        return (
+            f"{base}, lora_name={self.lora_name}, return_reasoning={self.return_reasoning}"
+        )
 
     @staticmethod
     def from_dict(
-        params_dict_str: str, logger: "pb_utils.Logger"
+        params_dict_str: Union[str, bytes, dict, None],
+        logger: "pb_utils.Logger",
     ) -> "TritonSamplingParams":
         """
-        Creates a `TritonSamplingParams` object from a dictionary string.
+        Creates a `TritonSamplingParams` object from a dictionary-like payload.
 
-        This method parses a JSON string containing sampling parameters,
-        converts the values to appropriate types, and creates a
-        `TritonSamplingParams` object.
-
-        Args:
-            params_dict (str): A JSON string containing sampling parameters.
-            logger (pb_utils.Logger): Triton Inference Server logger object.
+        The payload can be provided as:
+          * A JSON string (or bytes) containing sampling parameters
+          * A Python ``dict`` with the sampling parameters
+          * ``None`` to fall back to the default ``SamplingParams``
 
         Returns:
             TritonSamplingParams: An instance of TritonSamplingParams.
         """
+
+        def _normalize_bool(value: Any) -> bool:
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
         try:
-            params_dict = json.loads(params_dict_str)
-            vllm_params_dict = SamplingParams.__annotations__
-            type_mapping = {
-                int: int,
-                float: float,
-                bool: bool,
-                str: str,
-                Optional[int]: int,
-            }
-            for key, value in params_dict.items():
-                if key == "structured_outputs":
-                    params_dict[key] = StructuredOutputsParams(**json.loads(value))
-                elif key in vllm_params_dict:
-                    vllm_type = vllm_params_dict[key]
-                    if vllm_type in type_mapping:
-                        params_dict[key] = type_mapping[vllm_type](params_dict[key])
+            params_dict = coerce_parameters_payload(params_dict_str, logger)
 
-            return TritonSamplingParams(**params_dict)
+            # Some clients wrap the sampling configuration inside a `sampling_parameters`
+            # key. If present, unwrap it before continuing so we only pass sampling
+            # arguments to vLLM.
+            if "sampling_parameters" in params_dict:
+                params_dict = coerce_parameters_payload(
+                    params_dict["sampling_parameters"], logger
+                )
 
+            structured_outputs_cfg = params_dict.get("structured_outputs")
+            if structured_outputs_cfg is not None:
+                structured_outputs_cfg = coerce_parameters_payload(
+                    structured_outputs_cfg, logger
+                )
+                if structured_outputs_cfg:
+                    params_dict["structured_outputs"] = StructuredOutputsParams(
+                        **structured_outputs_cfg
+                    )
+
+            reasoning_cfg = params_dict.get("reasoning")
+            if reasoning_cfg is not None:
+                reasoning_cfg = coerce_parameters_payload(reasoning_cfg, logger)
+                if reasoning_cfg and "enable" in reasoning_cfg and not reasoning_cfg.get(
+                    "enable", True
+                ):
+                    # When reasoning is explicitly disabled we simply remove the block to
+                    # avoid passing unnecessary structures to older vLLM versions.
+                    params_dict.pop("reasoning", None)
+                elif reasoning_cfg and ReasoningParams is not None:
+                    params_dict["reasoning"] = ReasoningParams(**reasoning_cfg)
+                elif reasoning_cfg:
+                    logger.log_warn(
+                        "[vllm] Reasoning parameters provided, but this vLLM version does "
+                        "not expose `ReasoningParams`. Ignoring reasoning configuration."
+                    )
+                    params_dict.pop("reasoning", None)
+
+            init_kwargs = dict(params_dict)
+            lora_name = init_kwargs.pop("lora_name", None)
+            return_reasoning = init_kwargs.pop("return_reasoning", None)
+
+            try:
+                sampling_params = TritonSamplingParams(**init_kwargs)
+            except TypeError as exc:
+                known_fields = set(SamplingParams.__annotations__.keys())
+                filtered_kwargs = {
+                    key: value for key, value in init_kwargs.items() if key in known_fields
+                }
+                logger.log_warn(
+                    "[vllm] Dropped unsupported sampling parameters while creating "
+                    f"`TritonSamplingParams`: {exc}"
+                )
+                sampling_params = TritonSamplingParams(**filtered_kwargs)
+
+            if lora_name is not None:
+                sampling_params.lora_name = lora_name
+
+            if return_reasoning is not None:
+                sampling_params.return_reasoning = _normalize_bool(return_reasoning)
+
+            return sampling_params
         except Exception as e:
             logger.log_error(
                 f"[vllm] Was trying to create `TritonSamplingParams`, but got exception: {e}"
             )
-            return None
+
+        return TritonSamplingParams()
 
 
 # Copy from vllm/vllm/entrypoints/openai/api_server.py with custom stat_loggers

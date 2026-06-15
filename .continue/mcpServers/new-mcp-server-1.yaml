@@ -1,0 +1,18 @@
+name: Excel & CSV MCP servers
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: Excel MCP server
+    command: npx
+    args:
+      - -y
+      - "@negokaz/excel-mcp-server"
+    env:
+      EXCEL_MCP_PAGING_CELLS_LIMIT: "4000"
+  - name: CSV MCP server
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-csv"
+    env: {}
+

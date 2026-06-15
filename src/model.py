@@ -40,7 +40,10 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 
 from utils.metrics import VllmStatLoggerFactory
 from utils.request import EmbedRequest, GenerateRequest
-from utils.vllm_backend_utils import build_async_engine_client_from_engine_args
+from utils.vllm_backend_utils import (
+    build_async_engine_client_from_engine_args,
+    coerce_parameters_payload,
+)
 
 _VLLM_ENGINE_ARGS_FILENAME = "model.json"
 _MULTI_LORA_ARGS_FILENAME = "multi_lora.json"
@@ -120,6 +123,12 @@ class TritonPythonModel:
             },
             {
                 "name": "return_num_output_tokens",
+                "data_type": "TYPE_BOOL",
+                "dims": [1],
+                "optional": True,
+            },
+            {
+                "name": "return_reasoning",
                 "data_type": "TYPE_BOOL",
                 "dims": [1],
                 "optional": True,
@@ -630,11 +639,20 @@ class TritonPythonModel:
             request, "sampling_parameters"
         )
         if parameters_input_tensor:
-            parameters = parameters_input_tensor.as_numpy()[0].decode("utf-8")
+            parameters_payload = parameters_input_tensor.as_numpy()[0]
         else:
-            parameters = request.parameters()
+            parameters_payload = request.parameters()
 
-        lora_name = json.loads(parameters).pop("lora_name", None)
+        parameters_dict = coerce_parameters_payload(parameters_payload, self.logger)
+        sampling_parameters_dict = parameters_dict
+        if "sampling_parameters" in parameters_dict:
+            sampling_parameters_dict = coerce_parameters_payload(
+                parameters_dict["sampling_parameters"], self.logger
+            )
+
+        lora_name = sampling_parameters_dict.get("lora_name")
+        if lora_name is None:
+            lora_name = parameters_dict.get("lora_name")
         if lora_name is not None:
             if not self.enable_lora:
                 lora_error = pb_utils.TritonError("LoRA feature is not enabled.")

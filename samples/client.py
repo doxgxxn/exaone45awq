@@ -120,6 +120,19 @@ class LLMClient:
         exclude_input_in_output = self._flags.exclude_inputs_in_outputs
         if self._flags.lora_name is not None:
             sampling_parameters["lora_name"] = self._flags.lora_name
+        if self._flags.return_reasoning:
+            sampling_parameters["return_reasoning"] = True
+            reasoning_cfg = sampling_parameters.get("reasoning", {})
+            if not reasoning_cfg:
+                reasoning_cfg = {"enable": True}
+            else:
+                reasoning_cfg = dict(reasoning_cfg)
+                reasoning_cfg.setdefault("enable", True)
+            if self._flags.reasoning_budget_tokens is not None:
+                reasoning_cfg["budget_tokens"] = self._flags.reasoning_budget_tokens
+            if self._flags.reasoning_warmup_tokens is not None:
+                reasoning_cfg["warmup_tokens"] = self._flags.reasoning_warmup_tokens
+            sampling_parameters["reasoning"] = reasoning_cfg
         with open(self._flags.input_prompts, "r") as file:
             print(f"Loading inputs from `{self._flags.input_prompts}`...")
             prompts = file.readlines()
@@ -159,6 +172,17 @@ class LLMClient:
         send_parameters_as_tensor=True,
     ):
         inputs = []
+        return_reasoning = sampling_parameters.get("return_reasoning")
+        if isinstance(return_reasoning, str):
+            return_reasoning_flag = return_reasoning.strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            return_reasoning_flag = bool(return_reasoning)
+
         prompt_data = np.array([prompt.encode("utf-8")], dtype=np.object_)
         try:
             inputs.append(grpcclient.InferInput("text_input", [1], "BYTES"))
@@ -184,9 +208,15 @@ class LLMClient:
         inputs.append(grpcclient.InferInput("exclude_input_in_output", [1], "BOOL"))
         inputs[-1].set_data_from_numpy(np.array([exclude_input_in_output], dtype=bool))
 
+        if return_reasoning_flag:
+            inputs.append(grpcclient.InferInput("return_reasoning", [1], "BOOL"))
+            inputs[-1].set_data_from_numpy(np.array([True], dtype=bool))
+
         # Add requested outputs
         outputs = []
         outputs.append(grpcclient.InferRequestedOutput("text_output"))
+        if return_reasoning_flag:
+            outputs.append(grpcclient.InferRequestedOutput("reasoning_output"))
 
         # Issue the asynchronous sequence inference.
         return {
@@ -282,6 +312,27 @@ if __name__ == "__main__":
         required=False,
         default=None,
         help="The querying LoRA name",
+    )
+    parser.add_argument(
+        "--return-reasoning",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Request reasoning outputs in addition to text",
+    )
+    parser.add_argument(
+        "--reasoning-budget-tokens",
+        type=int,
+        required=False,
+        default=None,
+        help="Optional reasoning token budget",
+    )
+    parser.add_argument(
+        "--reasoning-warmup-tokens",
+        type=int,
+        required=False,
+        default=None,
+        help="Optional reasoning warmup token count",
     )
     FLAGS = parser.parse_args()
 
