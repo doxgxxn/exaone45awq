@@ -1,0 +1,10 @@
+allowTerminalExecution: true
+
+terminal:
+  autoApprove: true
+  allowedCommands:
+    - "python"
+    - "pip"
+    - "npx"
+    - "node"
+    - "docker"

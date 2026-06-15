@@ -228,6 +228,8 @@ class TritonPythonModel:
         with open(engine_args_filepath) as file:
             self.vllm_engine_config = json.load(file)
 
+        self._normalize_quantization_config()
+
         # Validate device and multi-processing settings are currently set based on model/configs.
         self._validate_device_config()
 
@@ -317,6 +319,22 @@ class TritonPythonModel:
 
         self._llm_engine = None
         self.logger.log_info("[vllm] Shutdown complete")
+
+    def _normalize_quantization_config(self):
+        quantization = self.vllm_engine_config.get("quantization")
+        if isinstance(quantization, str):
+            normalized = quantization
+            if quantization == "compressed_tensors":
+                normalized = "compressed-tensors"
+            elif quantization == "compressed-tensor":
+                normalized = "compressed-tensors"
+            elif quantization == "compressed tensors":
+                normalized = "compressed-tensors"
+            if normalized != quantization:
+                self.logger.log_info(
+                    f"[vllm] Normalizing quantization '{quantization}' to '{normalized}'"
+                )
+                self.vllm_engine_config["quantization"] = normalized
 
     def _validate_device_config(self):
         triton_kind = self.args["model_instance_kind"]

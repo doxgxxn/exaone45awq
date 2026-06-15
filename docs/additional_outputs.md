@@ -67,6 +67,19 @@ for more details on the log probabilities.
 To enable, set `return_logprobs` input tensor to `True`. The log probabilities
 will be sent on the `logprobs` output tensor as a serialized JSON string.
 
+### Reasoning Output
+
+For models/configurations that support vLLM reasoning extraction (for example,
+when `reasoning_parser` is set in `model.json`), the backend can optionally
+return the model's reasoning separately from the final answer.
+
+To enable, set the `return_reasoning` input tensor to `True`.
+
+If enabled, the backend will return a `reasoning_output` output tensor.
+* In streaming mode, `reasoning_output` contains only the incremental (delta)
+  reasoning text since the previous response.
+* In non-streaming mode, the full reasoning text is returned.
+
 ### Number of Input Tokens
 
 The number of token IDs of the prompt. See

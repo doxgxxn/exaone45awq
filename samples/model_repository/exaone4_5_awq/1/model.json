@@ -1,9 +1,13 @@
-curl -X POST http://localhost:8000/v2/models/exaone4_5_awq/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-        "text_input": "Explain why EXAONE 4.5 needs so much memory.",
-        "parameters": {
-          "stream": false,
-          "return_reasoning": true,
-              }
-      }'
+{
+  "model": "/tmp/vllm_backend/samples/model_repository/exaone4_5_awq",
+  "quantization": "compressed-tensors",
+  "trust_remote_code": true,
+  "tensor_parallel_size": 1,
+  "max_model_len": 16000,
+  "gpu_memory_utilization": 0.85,
+  "limit_mm_per_prompt": {
+    "image": 64
+  },
+  "reasoning_parser": "qwen3",
+  "speculative_config": {"method": "mtp", "num_speculative_tokens": 3}
+}

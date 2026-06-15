@@ -44,10 +44,7 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
-from utils.vllm_backend_utils import (
-    TritonSamplingParams,
-    coerce_parameters_payload,
-)
+from utils.vllm_backend_utils import TritonSamplingParams, coerce_parameters_payload
 
 
 class RequestBase:
@@ -145,16 +142,38 @@ class GenerateRequest(RequestBase):
             self.triton_request, "sampling_parameters"
         )
         if sampling_parameters:
-            parameters_payload = sampling_parameters.as_numpy()[0]
+            parameters = sampling_parameters.as_numpy()[0].decode("utf-8")
         else:
-            parameters_payload = self.triton_request.parameters()
+            parameters = self.triton_request.parameters()
 
-        parameters_dict = coerce_parameters_payload(parameters_payload, self.logger)
-        sampling_parameters_dict = parameters_dict
-        if "sampling_parameters" in parameters_dict:
-            sampling_parameters_dict = coerce_parameters_payload(
-                parameters_dict["sampling_parameters"], self.logger
-            )
+        # return_reasoning
+        return_reasoning_tensor = pb_utils.get_input_tensor_by_name(
+            self.triton_request, "return_reasoning"
+        )
+        return_reasoning = False
+        if return_reasoning_tensor:
+            return_reasoning = bool(return_reasoning_tensor.as_numpy()[0])
+
+        # Merge the return_reasoning flag into the sampling parameters.
+        # This mirrors vLLM's OpenAI entrypoints behavior where reasoning output is
+        # only produced when explicitly enabled.
+        parameters_dict = coerce_parameters_payload(parameters, self.logger)
+
+        # Also honor return_reasoning when it is provided inside the serialized
+        # sampling parameters payload (e.g. OpenAI-compatible frontends).
+        if not return_reasoning:
+            return_reasoning = bool(parameters_dict.get("return_reasoning", False))
+
+        if return_reasoning:
+            parameters_dict["return_reasoning"] = True
+            reasoning_cfg = parameters_dict.get("reasoning")
+            if reasoning_cfg is None:
+                parameters_dict["reasoning"] = {"enable": True}
+            else:
+                reasoning_cfg = coerce_parameters_payload(reasoning_cfg, self.logger)
+                reasoning_cfg.setdefault("enable", True)
+                parameters_dict["reasoning"] = reasoning_cfg
+        parameters = parameters_dict
 
         # additional outputs
         additional_outputs = {
@@ -163,7 +182,6 @@ class GenerateRequest(RequestBase):
             "return_logprobs": None,
             "return_num_input_tokens": None,
             "return_num_output_tokens": None,
-            "return_reasoning": None,
         }
         for tensor_name in additional_outputs.keys():
             tensor = pb_utils.get_input_tensor_by_name(self.triton_request, tensor_name)
@@ -173,24 +191,13 @@ class GenerateRequest(RequestBase):
                 tensor = False
             additional_outputs[tensor_name] = tensor
 
-        if not additional_outputs["return_reasoning"]:
-            requested_reasoning = parameters_dict.get("return_reasoning")
-            if requested_reasoning is None:
-                requested_reasoning = sampling_parameters_dict.get("return_reasoning")
-            if requested_reasoning is not None:
-                if isinstance(requested_reasoning, str):
-                    additional_outputs["return_reasoning"] = (
-                        requested_reasoning.strip().lower() in ("1", "true", "yes", "on")
-                    )
-                else:
-                    additional_outputs["return_reasoning"] = bool(requested_reasoning)
-
         return (
             prompt,
             stream,
             prepend_input,
-            parameters_payload,
+            parameters,
             additional_outputs,
+            return_reasoning,
         )
 
     async def execute(self):
@@ -198,22 +205,14 @@ class GenerateRequest(RequestBase):
             prompt,
             self.stream,
             self.prepend_input,
-            parameters_payload,
+            parameters,
             self.additional_outputs,
+            self.return_reasoning,
         ) = self._get_input_tensors()
 
-        sampling_params = TritonSamplingParams.from_dict(
-            parameters_payload, self.logger
-        )
-        if self.additional_outputs.get("return_reasoning") and (
-            sampling_params.return_reasoning is None
-        ):
+        sampling_params = TritonSamplingParams.from_dict(parameters, self.logger)
+        if getattr(self, "return_reasoning", False):
             sampling_params.return_reasoning = True
-        elif sampling_params.return_reasoning is not None:
-            self.additional_outputs["return_reasoning"] = bool(
-                sampling_params.return_reasoning
-            )
-
         lora_name = sampling_params.lora_name
         lora_request = None
         if lora_name is not None:
@@ -260,20 +259,31 @@ class GenerateRequest(RequestBase):
             )
         )
 
-        if self.additional_outputs.get("return_reasoning"):
-            reasoning_texts = []
-            for output in request_output.outputs:
-                reasoning_payload = getattr(output, "reasoning_output", None)
-                if reasoning_payload is None:
-                    reasoning_texts.append(b"")
-                elif isinstance(reasoning_payload, (dict, list)):
-                    reasoning_texts.append(json.dumps(reasoning_payload).encode("utf-8"))
-                else:
-                    reasoning_texts.append(str(reasoning_payload).encode("utf-8"))
+        # reasoning_output (OpenAI-style incremental/delta behavior)
+        if getattr(self, "return_reasoning", False):
+            if "prev_lens_reasoning_output" not in request_output_state:
+                request_output_state["prev_lens_reasoning_output"] = [0] * len(
+                    request_output.outputs
+                )
+            prev_lens_reasoning = request_output_state["prev_lens_reasoning_output"]
+
+            reasoning_texts_full = [
+                (getattr(output, "reasoning_output", "") or "")
+                for output in request_output.outputs
+            ]
+            reasoning_output = [
+                reasoning_text[prev_len:].encode("utf-8")
+                for reasoning_text, prev_len in zip(
+                    reasoning_texts_full, prev_lens_reasoning
+                )
+            ]
+            request_output_state["prev_lens_reasoning_output"] = [
+                len(reasoning_text) for reasoning_text in reasoning_texts_full
+            ]
             output_tensors.append(
                 pb_utils.Tensor(
                     "reasoning_output",
-                    np.asarray(reasoning_texts, dtype=np.object_),
+                    np.asarray(reasoning_output, dtype=self.output_dtype),
                 )
             )
 
