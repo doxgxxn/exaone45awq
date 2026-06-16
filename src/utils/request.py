@@ -161,11 +161,29 @@ class GenerateRequest(RequestBase):
         # only produced when explicitly enabled.
         parameters_dict = coerce_parameters_payload(parameters, self.logger)
 
+        def _normalize_bool(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
+        chat_template_kwargs = coerce_parameters_payload(
+            parameters_dict.get("chat_template_kwargs"), self.logger
+        )
+
         # OpenAI-style chat request support (messages -> rendered prompt).
-        # This is needed for models that only produce "thinking" / reasoning
-        # traces when chat templates are rendered with flags like
-        # `chat_template_kwargs.enable_thinking=true`.
+        # NOTE: Triton HTTP /generate only supports scalar types inside `parameters`.
+        # So if clients want to pass OpenAI messages, they must pass them as a JSON
+        # string. We also support a convenience flag `enable_thinking=true` to render
+        # a chat template from `text_input` without sending `messages`.
         messages = parameters_dict.get("messages")
+        enable_thinking = _normalize_bool(
+            parameters_dict.get("enable_thinking")
+            if "enable_thinking" in parameters_dict
+            else chat_template_kwargs.get("enable_thinking")
+        )
+
         if messages is not None:
             if isinstance(messages, bytes):
                 messages = messages.decode("utf-8")
@@ -173,21 +191,40 @@ class GenerateRequest(RequestBase):
                 messages = json.loads(messages)
             if not isinstance(messages, list):
                 raise ValueError(
-                    "`parameters.messages` must be a list of chat messages (OpenAI format)."
+                    "`parameters.messages` must be a list (or JSON string) of chat messages."
                 )
             if self.tokenizer is None:
                 raise ValueError(
                     "Received `parameters.messages` but tokenizer is not available in the backend."
                 )
-            chat_template_kwargs = coerce_parameters_payload(
-                parameters_dict.get("chat_template_kwargs"), self.logger
-            )
             prompt = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
                 **chat_template_kwargs,
             )
+
+        elif enable_thinking:
+            # Convenience mode: user only provides text_input, and asks us to
+            # render the model's chat template with enable_thinking.
+            if self.tokenizer is None:
+                raise ValueError(
+                    "Received `enable_thinking=true` but tokenizer is not available in the backend."
+                )
+            if isinstance(prompt, dict):
+                self.logger.log_warn(
+                    "[vllm] enable_thinking requested, but prompt is multimodal. "
+                    "Chat template rendering is skipped for multimodal prompts."
+                )
+            else:
+                rendered_kwargs = dict(chat_template_kwargs)
+                rendered_kwargs.setdefault("enable_thinking", True)
+                prompt = self.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **rendered_kwargs,
+                )
 
         # Also honor return_reasoning when it is provided inside the serialized
         # sampling parameters payload (e.g. OpenAI-compatible frontends).
@@ -304,18 +341,29 @@ class GenerateRequest(RequestBase):
                     reasoning_payload = getattr(output, "reasoning", None)
 
                 if reasoning_payload is None or reasoning_payload == "":
-                    # Fallback: extract <think>...</think> from the generated text.
-                    # This is important for models that only emit reasoning traces
-                    # inside the chat template (e.g. enable_thinking=True), where
-                    # vLLM may not populate `reasoning_output` for the raw generate API.
-                    text = getattr(output, "text", "") or ""
-                    start = text.find("<think>")
+                    # Fallback: extract <think>...</think> from the full text.
+                    # NOTE: For chat-template prompts, the "<think>" tag is often
+                    # part of the rendered prompt (request_output.prompt), not part
+                    # of output.text. So we must scan the concatenated text.
+                    prompt_text = getattr(request_output, "prompt", "") or ""
+                    gen_text = getattr(output, "text", "") or ""
+                    full_text = prompt_text + gen_text
+
+                    start = full_text.find("<think>")
                     if start >= 0:
                         start += len("<think>")
-                        end = text.find("</think>", start)
+                        end = full_text.find("</think>", start)
                         if end < 0:
-                            end = len(text)
-                        reasoning_text = text[start:end].lstrip("\n")
+                            # Many templates don't emit the closing tag. Stop at a
+                            # common delimiter if present, else take until end.
+                            for delimiter in ("<final>", "</final>"):
+                                delimiter_pos = full_text.find(delimiter, start)
+                                if delimiter_pos >= 0:
+                                    end = delimiter_pos
+                                    break
+                        if end < 0:
+                            end = len(full_text)
+                        reasoning_text = full_text[start:end].lstrip("\n")
                         reasoning_texts_full.append(reasoning_text)
                     else:
                         reasoning_texts_full.append("")

@@ -287,6 +287,56 @@ def test_return_reasoning_tensor_is_merged_into_parameters():
     assert parameters["reasoning"]["enable"] is True
 
 
+def test_enable_thinking_renders_template_from_text_input():
+    _install_stub_modules()
+
+    sys.path.insert(0, "src")
+    request_mod = importlib.import_module("utils.request")
+
+    np = sys.modules["numpy"]
+
+    class FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **kwargs,
+        ):
+            assert messages[0]["role"] == "user"
+            assert kwargs.get("enable_thinking") is True
+            return (
+                "<|user|>\n"
+                + messages[0]["content"]
+                + "<|endofturn|>\n<|assistant|>\n<think>\n"
+            )
+
+    sampling_params = {"enable_thinking": True}
+    req = DummyTritonRequest(
+        inputs={
+            "text_input": DummyInputTensor([b"hi"]),
+            "stream": DummyInputTensor([False]),
+            "exclude_input_in_output": DummyInputTensor([True]),
+            "sampling_parameters": DummyInputTensor(
+                [json.dumps(sampling_params).encode("utf-8")]
+            ),
+            "return_reasoning": DummyInputTensor([True]),
+        }
+    )
+
+    gr = request_mod.GenerateRequest(
+        req,
+        executor_callback=lambda *args, **kwargs: None,
+        output_dtype=np.object_,
+        logger=sys.modules["triton_python_backend_utils"].Logger,
+        tokenizer=FakeTokenizer(),
+    )
+
+    prompt, *_rest = gr._get_input_tensors()
+    assert isinstance(prompt, str)
+    assert prompt.startswith("<|user|>")
+
+
 def test_reasoning_output_is_incremental_and_encoded():
     _install_stub_modules()
     sys.path.insert(0, "src")
@@ -343,9 +393,49 @@ def test_reasoning_output_is_incremental_and_encoded():
     assert tensors2["reasoning_output"].tolist() == [b" THINK2"]
 
 
+def test_fallback_extracts_think_from_prompt_when_reasoning_fields_missing():
+    _install_stub_modules()
+    sys.path.insert(0, "src")
+    request_mod = importlib.import_module("utils.request")
+
+    np = sys.modules["numpy"]
+
+    req = DummyTritonRequest(inputs={"text_input": DummyInputTensor([b"prompt"])})
+
+    gr = request_mod.GenerateRequest(
+        req,
+        executor_callback=lambda *args, **kwargs: None,
+        output_dtype=np.object_,
+        logger=sys.modules["triton_python_backend_utils"].Logger,
+        tokenizer=None,
+    )
+    gr.return_reasoning = True
+    gr.additional_outputs = {
+        "return_finish_reason": False,
+        "return_cumulative_logprob": False,
+        "return_logprobs": False,
+        "return_num_input_tokens": False,
+        "return_num_output_tokens": False,
+    }
+
+    state = {}
+    out = DummyRequestOutput(
+        # Simulate a chat-template prompt where <think> is in the prompt.
+        prompt="<|assistant|>\n<think>\n",
+        outputs=[DummySequenceOutput(text="ABC", reasoning_output=None)],
+        finished=True,
+        prompt_token_ids=[1],
+    )
+    resp = gr.create_response(out, state, prepend_input=False)
+    tensors = resp.tensor_dict()
+    assert tensors["reasoning_output"].tolist() == [b"ABC"]
+
+
 def main() -> None:
     test_return_reasoning_tensor_is_merged_into_parameters()
+    test_enable_thinking_renders_template_from_text_input()
     test_reasoning_output_is_incremental_and_encoded()
+    test_fallback_extracts_think_from_prompt_when_reasoning_fields_missing()
     print("OK")
 
 
