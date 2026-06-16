@@ -270,6 +270,7 @@ def test_return_reasoning_tensor_is_merged_into_parameters():
         executor_callback=lambda *args, **kwargs: None,
         output_dtype=np.object_,
         logger=sys.modules["triton_python_backend_utils"].Logger,
+        tokenizer=None,
     )
 
     (
@@ -304,6 +305,7 @@ def test_reasoning_output_is_incremental_and_encoded():
         executor_callback=lambda *args, **kwargs: None,
         output_dtype=np.object_,
         logger=sys.modules["triton_python_backend_utils"].Logger,
+        tokenizer=None,
     )
     gr.return_reasoning = True
     gr.additional_outputs = {

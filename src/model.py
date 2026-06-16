@@ -32,7 +32,7 @@ import queue
 import threading
 import traceback
 from collections import Counter
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 import triton_python_backend_utils as pb_utils
@@ -189,6 +189,11 @@ class TritonPythonModel:
         # TODO: Move this into _init_engine(), after moving check metrics enabled.
         self._init_engine_args()
 
+        # Tokenizer (optional): used for rendering OpenAI-style chat templates when
+        # `parameters.messages` is provided.
+        self._tokenizer: Any | None = None
+        self._init_tokenizer()
+
         # Check if metrics are enabled. The ZMQ process cannot be used when metrics are
         # enabled.
         # TODO: Move the check into _setup_metrics().
@@ -238,6 +243,34 @@ class TritonPythonModel:
 
         # Create an AsyncEngineArgs from the config from JSON
         self._aync_engine_args = AsyncEngineArgs(**self.vllm_engine_config)
+
+    def _init_tokenizer(self):
+        model_path = self.vllm_engine_config.get("model")
+        if not model_path:
+            return
+
+        trust_remote_code = bool(self.vllm_engine_config.get("trust_remote_code", False))
+
+        try:
+            from transformers import AutoTokenizer  # type: ignore
+        except Exception as exc:
+            self.logger.log_warn(
+                f"[vllm] transformers not available; chat template rendering disabled: {exc}"
+            )
+            return
+
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                trust_remote_code=trust_remote_code,
+            )
+            self.logger.log_info(f"[vllm] Loaded tokenizer from {model_path}")
+        except Exception as exc:
+            self.logger.log_warn(
+                f"[vllm] Failed to load tokenizer from {model_path}. "
+                f"Chat template rendering disabled: {exc}"
+            )
+            self._tokenizer = None
 
     def _init_engine(self):
         # Run the engine in a separate thread running the AsyncIO event loop.
@@ -547,6 +580,7 @@ class TritonPythonModel:
                         self.logger,
                         self.lora_repository,
                         self.supported_loras,
+                        tokenizer=self._tokenizer,
                     )
                 else:
                     request = GenerateRequest(
@@ -554,6 +588,7 @@ class TritonPythonModel:
                         self._llm_engine.generate,
                         self.output_dtype,
                         self.logger,
+                        tokenizer=self._tokenizer,
                     )
             elif request_task_name == "embed":
                 request = EmbedRequest(

@@ -28,7 +28,7 @@ import base64
 import json
 from abc import abstractmethod
 from io import BytesIO
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import triton_python_backend_utils as pb_utils
@@ -81,9 +81,11 @@ class GenerateRequest(RequestBase):
         logger,
         lora_repository: Optional[Dict[str, str]] = None,
         supported_loras: Optional[List[str]] = None,
+        tokenizer: Optional[Any] = None,
     ):
         super().__init__(request, executor_callback, output_dtype, logger)
         # Attributes for generate requests
+        self.tokenizer = tokenizer
         if lora_repository is not None:
             self.lora_repository = lora_repository
         if supported_loras is not None:
@@ -158,6 +160,34 @@ class GenerateRequest(RequestBase):
         # This mirrors vLLM's OpenAI entrypoints behavior where reasoning output is
         # only produced when explicitly enabled.
         parameters_dict = coerce_parameters_payload(parameters, self.logger)
+
+        # OpenAI-style chat request support (messages -> rendered prompt).
+        # This is needed for models that only produce "thinking" / reasoning
+        # traces when chat templates are rendered with flags like
+        # `chat_template_kwargs.enable_thinking=true`.
+        messages = parameters_dict.get("messages")
+        if messages is not None:
+            if isinstance(messages, bytes):
+                messages = messages.decode("utf-8")
+            if isinstance(messages, str):
+                messages = json.loads(messages)
+            if not isinstance(messages, list):
+                raise ValueError(
+                    "`parameters.messages` must be a list of chat messages (OpenAI format)."
+                )
+            if self.tokenizer is None:
+                raise ValueError(
+                    "Received `parameters.messages` but tokenizer is not available in the backend."
+                )
+            chat_template_kwargs = coerce_parameters_payload(
+                parameters_dict.get("chat_template_kwargs"), self.logger
+            )
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                **chat_template_kwargs,
+            )
 
         # Also honor return_reasoning when it is provided inside the serialized
         # sampling parameters payload (e.g. OpenAI-compatible frontends).
@@ -267,10 +297,15 @@ class GenerateRequest(RequestBase):
                 )
             prev_lens_reasoning = request_output_state["prev_lens_reasoning_output"]
 
-            reasoning_texts_full = [
-                (getattr(output, "reasoning_output", "") or "")
-                for output in request_output.outputs
-            ]
+            reasoning_texts_full = []
+            for output in request_output.outputs:
+                reasoning_payload = getattr(output, "reasoning_output", None)
+                if not reasoning_payload:
+                    reasoning_payload = getattr(output, "reasoning", None)
+                if reasoning_payload is None:
+                    reasoning_texts_full.append("")
+                else:
+                    reasoning_texts_full.append(str(reasoning_payload))
             reasoning_output = [
                 reasoning_text[prev_len:].encode("utf-8")
                 for reasoning_text, prev_len in zip(
