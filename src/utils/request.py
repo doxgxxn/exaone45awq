@@ -303,23 +303,61 @@ class GenerateRequest(RequestBase):
     ):
         output_tensors = []
 
+        def _extract_tag_payload(text: str, tag: str) -> str:
+            start_token = f"<{tag}>"
+            end_token = f"</{tag}>"
+            start = text.find(start_token)
+            if start < 0:
+                return ""
+            start += len(start_token)
+            end = text.find(end_token, start)
+            if end < 0:
+                end = len(text)
+            return text[start:end].lstrip("\n")
+
         # text_output
-        prepend_prompt = ""
-        if "prev_lens_text_output" not in request_output_state:
-            # this is the first response
-            if prepend_input:
-                prepend_prompt = request_output.prompt
-            request_output_state["prev_lens_text_output"] = [0] * len(
-                request_output.outputs
-            )
-        prev_lens = request_output_state["prev_lens_text_output"]
-        text_output = [
-            (prepend_prompt + output.text[prev_len:]).encode("utf-8")
-            for output, prev_len in zip(request_output.outputs, prev_lens)
-        ]
-        request_output_state["prev_lens_text_output"] = [
-            len(output.text) for output in request_output.outputs
-        ]
+        # When return_reasoning is enabled, we only emit the <final>...</final>
+        # segment as text_output (and empty string if no <final> exists).
+        # This avoids duplicating the reasoning trace in both tensors.
+        if getattr(self, "return_reasoning", False):
+            if "prev_lens_final_output" not in request_output_state:
+                request_output_state["prev_lens_final_output"] = [0] * len(
+                    request_output.outputs
+                )
+            prev_lens_final = request_output_state["prev_lens_final_output"]
+
+            final_texts_full = []
+            for output in request_output.outputs:
+                prompt_text = getattr(request_output, "prompt", "") or ""
+                gen_text = getattr(output, "text", "") or ""
+                full_text = prompt_text + gen_text
+                final_texts_full.append(_extract_tag_payload(full_text, "final"))
+
+            text_output = [
+                final_text[prev_len:].encode("utf-8")
+                for final_text, prev_len in zip(final_texts_full, prev_lens_final)
+            ]
+            request_output_state["prev_lens_final_output"] = [
+                len(final_text) for final_text in final_texts_full
+            ]
+        else:
+            prepend_prompt = ""
+            if "prev_lens_text_output" not in request_output_state:
+                # this is the first response
+                if prepend_input:
+                    prepend_prompt = request_output.prompt
+                request_output_state["prev_lens_text_output"] = [0] * len(
+                    request_output.outputs
+                )
+            prev_lens = request_output_state["prev_lens_text_output"]
+            text_output = [
+                (prepend_prompt + output.text[prev_len:]).encode("utf-8")
+                for output, prev_len in zip(request_output.outputs, prev_lens)
+            ]
+            request_output_state["prev_lens_text_output"] = [
+                len(output.text) for output in request_output.outputs
+            ]
+
         output_tensors.append(
             pb_utils.Tensor(
                 "text_output", np.asarray(text_output, dtype=self.output_dtype)

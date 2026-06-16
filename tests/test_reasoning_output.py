@@ -376,7 +376,10 @@ def test_reasoning_output_is_incremental_and_encoded():
     )
     resp1 = gr.create_response(out1, state, prepend_input=False)
     tensors1 = resp1.tensor_dict()
-    assert tensors1["text_output"].tolist() == [b"Hello"]
+    # When return_reasoning is enabled, the backend emits only the <final> block
+    # as text_output. Since this dummy output does not include <final>,
+    # text_output is empty.
+    assert tensors1["text_output"].tolist() == [b""]
     assert tensors1["reasoning_output"].tolist() == [b"THINK1"]
 
     out2 = DummyRequestOutput(
@@ -389,7 +392,7 @@ def test_reasoning_output_is_incremental_and_encoded():
     )
     resp2 = gr.create_response(out2, state, prepend_input=False)
     tensors2 = resp2.tensor_dict()
-    assert tensors2["text_output"].tolist() == [b" world"]
+    assert tensors2["text_output"].tolist() == [b""]
     assert tensors2["reasoning_output"].tolist() == [b" THINK2"]
 
 
