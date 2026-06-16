@@ -193,6 +193,8 @@ class TritonPythonModel:
         # `parameters.messages` is provided.
         self._tokenizer: Any | None = None
         self._init_tokenizer()
+        self._reasoning_parser_cls = None
+        self._init_reasoning_parser()
 
         # Check if metrics are enabled. The ZMQ process cannot be used when metrics are
         # enabled.
@@ -271,6 +273,32 @@ class TritonPythonModel:
                 f"Chat template rendering disabled: {exc}"
             )
             self._tokenizer = None
+
+    def _init_reasoning_parser(self):
+        reasoning_parser_name = self.vllm_engine_config.get("reasoning_parser")
+        if not reasoning_parser_name:
+            structured_outputs_config = self.vllm_engine_config.get(
+                "structured_outputs_config", {}
+            )
+            if isinstance(structured_outputs_config, dict):
+                reasoning_parser_name = structured_outputs_config.get("reasoning_parser")
+        if not reasoning_parser_name:
+            return
+
+        try:
+            from vllm.parser import ParserManager  # type: ignore
+
+            self._reasoning_parser_cls = ParserManager.get_reasoning_parser(
+                reasoning_parser_name=reasoning_parser_name
+            )
+            self.logger.log_info(
+                f"[vllm] Loaded reasoning parser '{reasoning_parser_name}'"
+            )
+        except Exception as exc:
+            self.logger.log_warn(
+                f"[vllm] Failed to load reasoning parser '{reasoning_parser_name}': {exc}"
+            )
+            self._reasoning_parser_cls = None
 
     def _init_engine(self):
         # Run the engine in a separate thread running the AsyncIO event loop.
@@ -581,6 +609,7 @@ class TritonPythonModel:
                         self.lora_repository,
                         self.supported_loras,
                         tokenizer=self._tokenizer,
+                        reasoning_parser_cls=self._reasoning_parser_cls,
                     )
                 else:
                     request = GenerateRequest(
@@ -589,6 +618,7 @@ class TritonPythonModel:
                         self.output_dtype,
                         self.logger,
                         tokenizer=self._tokenizer,
+                        reasoning_parser_cls=self._reasoning_parser_cls,
                     )
             elif request_task_name == "embed":
                 request = EmbedRequest(

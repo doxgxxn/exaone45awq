@@ -60,7 +60,10 @@ class LLMClient:
             for iter in range(self._flags.iterations):
                 for i, prompt in enumerate(prompts):
                     prompt_id = self._flags.offset + (len(prompts) * iter) + i
-                    self._results_dict[str(prompt_id)] = []
+                    self._results_dict[str(prompt_id)] = {
+                        "text": [],
+                        "reasoning": [],
+                    }
                     yield self.create_request(
                         prompt,
                         self._flags.streaming_mode,
@@ -104,7 +107,13 @@ class LLMClient:
             else:
                 output = result.as_numpy("text_output")
                 for i in output:
-                    self._results_dict[result.get_response().id].append(i)
+                    self._results_dict[result.get_response().id]["text"].append(i)
+                reasoning_output = result.as_numpy("reasoning_output")
+                if reasoning_output is not None:
+                    for i in reasoning_output:
+                        self._results_dict[result.get_response().id]["reasoning"].append(
+                            i
+                        )
         return success
 
     async def run(self):
@@ -143,7 +152,14 @@ class LLMClient:
 
         with open(self._flags.results_file, "w") as file:
             for id in self._results_dict.keys():
-                for result in self._results_dict[id]:
+                if self._flags.return_reasoning:
+                    reasoning = b"".join(self._results_dict[id]["reasoning"]).decode(
+                        "utf-8"
+                    )
+                    file.write("[reasoning]\n")
+                    file.write(reasoning)
+                    file.write("\n\n[content]\n")
+                for result in self._results_dict[id]["text"]:
                     file.write(result.decode("utf-8"))
 
                 file.write("\n")

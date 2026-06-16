@@ -72,6 +72,37 @@ def coerce_parameters_payload(
     return {}
 
 
+def _coerce_sampling_parameter_types(params_dict: Dict[str, Any]) -> Dict[str, Any]:
+    int_params = {
+        "best_of",
+        "max_tokens",
+        "min_tokens",
+        "n",
+        "seed",
+        "top_k",
+    }
+    float_params = {
+        "frequency_penalty",
+        "length_penalty",
+        "presence_penalty",
+        "repetition_penalty",
+        "temperature",
+        "top_p",
+        "min_p",
+    }
+
+    coerced = dict(params_dict)
+    for key in int_params:
+        value = coerced.get(key)
+        if isinstance(value, str) and value.strip().lower() not in ("", "none", "null"):
+            coerced[key] = int(value)
+    for key in float_params:
+        value = coerced.get(key)
+        if isinstance(value, str) and value.strip().lower() not in ("", "none", "null"):
+            coerced[key] = float(value)
+    return coerced
+
+
 class TritonSamplingParams(SamplingParams):
     """
     Extended sampling parameters for text generation via
@@ -133,6 +164,7 @@ class TritonSamplingParams(SamplingParams):
                 params_dict = coerce_parameters_payload(
                     params_dict["sampling_parameters"], logger
                 )
+            params_dict = _coerce_sampling_parameter_types(params_dict)
 
             structured_outputs_cfg = params_dict.get("structured_outputs")
             if structured_outputs_cfg is not None:

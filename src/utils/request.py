@@ -82,10 +82,13 @@ class GenerateRequest(RequestBase):
         lora_repository: Optional[Dict[str, str]] = None,
         supported_loras: Optional[List[str]] = None,
         tokenizer: Optional[Any] = None,
+        reasoning_parser_cls: Optional[Any] = None,
     ):
         super().__init__(request, executor_callback, output_dtype, logger)
         # Attributes for generate requests
         self.tokenizer = tokenizer
+        self.reasoning_parser_cls = reasoning_parser_cls
+        self.reasoning_parser = None
         if lora_repository is not None:
             self.lora_repository = lora_repository
         if supported_loras is not None:
@@ -171,6 +174,7 @@ class GenerateRequest(RequestBase):
         chat_template_kwargs = coerce_parameters_payload(
             parameters_dict.get("chat_template_kwargs"), self.logger
         )
+        self.chat_template_kwargs = chat_template_kwargs
 
         # OpenAI-style chat request support (messages -> rendered prompt).
         # NOTE: Triton HTTP /generate only supports scalar types inside `parameters`.
@@ -229,7 +233,9 @@ class GenerateRequest(RequestBase):
         # Also honor return_reasoning when it is provided inside the serialized
         # sampling parameters payload (e.g. OpenAI-compatible frontends).
         if not return_reasoning:
-            return_reasoning = bool(parameters_dict.get("return_reasoning", False))
+            return_reasoning = _normalize_bool(
+                parameters_dict.get("return_reasoning", False)
+            )
 
         if return_reasoning:
             parameters_dict["return_reasoning"] = True
@@ -265,6 +271,7 @@ class GenerateRequest(RequestBase):
             parameters,
             additional_outputs,
             return_reasoning,
+            enable_thinking,
         )
 
     async def execute(self):
@@ -275,11 +282,17 @@ class GenerateRequest(RequestBase):
             parameters,
             self.additional_outputs,
             self.return_reasoning,
+            self.enable_thinking,
         ) = self._get_input_tensors()
 
         sampling_params = TritonSamplingParams.from_dict(parameters, self.logger)
         if getattr(self, "return_reasoning", False):
             sampling_params.return_reasoning = True
+            if self.reasoning_parser_cls is not None and self.tokenizer is not None:
+                self.reasoning_parser = self.reasoning_parser_cls(
+                    self.tokenizer,
+                    chat_template_kwargs=getattr(self, "chat_template_kwargs", {}),
+                )
         lora_name = sampling_params.lora_name
         lora_request = None
         if lora_name is not None:
@@ -303,43 +316,129 @@ class GenerateRequest(RequestBase):
     ):
         output_tensors = []
 
-        def _extract_tag_payload(text: str, tag: str) -> str:
-            start_token = f"<{tag}>"
-            end_token = f"</{tag}>"
+        def _split_thinking_text(text: str) -> tuple[str, str]:
+            start_token = "<think>"
+            end_token = "</think>"
             start = text.find(start_token)
-            if start < 0:
-                return ""
-            start += len(start_token)
-            end = text.find(end_token, start)
-            if end < 0:
-                end = len(text)
-            return text[start:end].lstrip("\n")
+            if start >= 0:
+                reasoning_start = start + len(start_token)
+                end = text.find(end_token, reasoning_start)
+                if end >= 0:
+                    return (
+                        text[reasoning_start:end].lstrip("\n"),
+                        text[end + len(end_token) :].lstrip("\n"),
+                    )
+                return text[reasoning_start:].lstrip("\n"), ""
 
-        # text_output
-        # When return_reasoning is enabled, we only emit the <final>...</final>
-        # segment as text_output (and empty string if no <final> exists).
-        # This avoids duplicating the reasoning trace in both tensors.
-        if getattr(self, "return_reasoning", False):
-            if "prev_lens_final_output" not in request_output_state:
-                request_output_state["prev_lens_final_output"] = [0] * len(
+            end = text.find(end_token)
+            if end >= 0:
+                return text[:end].lstrip("\n"), text[end + len(end_token) :].lstrip("\n")
+            return "", text
+
+        def _stream_delta_pair(
+            index: int, reasoning: str, content: str
+        ) -> tuple[str, str]:
+            if not getattr(self, "stream", False):
+                return reasoning, content
+            if "prev_lens_reasoning_split" not in request_output_state:
+                request_output_state["prev_lens_reasoning_split"] = [0] * len(
                     request_output.outputs
                 )
-            prev_lens_final = request_output_state["prev_lens_final_output"]
+                request_output_state["prev_lens_content_split"] = [0] * len(
+                    request_output.outputs
+                )
+            prev_reasoning = request_output_state["prev_lens_reasoning_split"][index]
+            prev_content = request_output_state["prev_lens_content_split"][index]
+            request_output_state["prev_lens_reasoning_split"][index] = len(reasoning)
+            request_output_state["prev_lens_content_split"][index] = len(content)
+            return reasoning[prev_reasoning:], content[prev_content:]
 
-            final_texts_full = []
-            for output in request_output.outputs:
-                prompt_text = getattr(request_output, "prompt", "") or ""
-                gen_text = getattr(output, "text", "") or ""
-                full_text = prompt_text + gen_text
-                final_texts_full.append(_extract_tag_payload(full_text, "final"))
+        def _split_reasoning_output(output: Any, index: int) -> tuple[str, str]:
+            gen_text = getattr(output, "text", "") or ""
+            parser = getattr(self, "reasoning_parser", None)
+            if parser is not None:
+                if getattr(self, "stream", False):
+                    if "previous_reasoning_parser_texts" not in request_output_state:
+                        request_output_state["previous_reasoning_parser_texts"] = [
+                            ""
+                        ] * len(request_output.outputs)
+                        request_output_state["previous_reasoning_parser_token_ids"] = [
+                            [] for _ in request_output.outputs
+                        ]
 
-            text_output = [
-                final_text[prev_len:].encode("utf-8")
-                for final_text, prev_len in zip(final_texts_full, prev_lens_final)
-            ]
-            request_output_state["prev_lens_final_output"] = [
-                len(final_text) for final_text in final_texts_full
-            ]
+                    previous_texts = request_output_state[
+                        "previous_reasoning_parser_texts"
+                    ]
+                    previous_token_ids_list = request_output_state[
+                        "previous_reasoning_parser_token_ids"
+                    ]
+                    previous_text = previous_texts[index]
+                    current_text = gen_text
+                    delta_text = (
+                        current_text[len(previous_text) :]
+                        if current_text.startswith(previous_text)
+                        else current_text
+                    )
+                    previous_token_ids = previous_token_ids_list[index]
+                    current_token_ids = list(getattr(output, "token_ids", []) or [])
+                    delta_token_ids = (
+                        current_token_ids[len(previous_token_ids) :]
+                        if current_token_ids[: len(previous_token_ids)]
+                        == previous_token_ids
+                        else current_token_ids
+                    )
+
+                    delta_message = parser.extract_reasoning_streaming(
+                        previous_text,
+                        current_text,
+                        delta_text,
+                        previous_token_ids,
+                        current_token_ids,
+                        delta_token_ids,
+                    )
+                    previous_texts[index] = current_text
+                    previous_token_ids_list[index] = current_token_ids
+                    if delta_message is None:
+                        return "", ""
+                    reasoning = getattr(delta_message, "reasoning", None) or ""
+                    content = getattr(delta_message, "content", None) or ""
+                    return reasoning, content
+
+                request = type("ReasoningRequest", (), {"include_reasoning": True})()
+                reasoning, content = parser.extract_reasoning(gen_text, request=request)
+                return reasoning or "", content or ""
+
+            reasoning_payload = getattr(output, "reasoning_output", None)
+            if not reasoning_payload:
+                reasoning_payload = getattr(output, "reasoning", None)
+            if reasoning_payload is not None and reasoning_payload != "":
+                return _stream_delta_pair(index, str(reasoning_payload), gen_text)
+
+            prompt_text = getattr(request_output, "prompt", "") or ""
+            reasoning, content = _split_thinking_text(prompt_text + gen_text)
+            if not reasoning:
+                return _stream_delta_pair(index, "", gen_text)
+            return _stream_delta_pair(index, reasoning, content)
+
+        # text_output
+        # When return_reasoning is enabled, split generated text into reasoning
+        # and final content with the configured vLLM reasoning parser.
+        if getattr(self, "return_reasoning", False):
+            reasoning_texts_full = []
+            content_texts_full = []
+            for i, output in enumerate(request_output.outputs):
+                reasoning_text, content_text = _split_reasoning_output(output, i)
+                reasoning_texts_full.append(reasoning_text)
+                content_texts_full.append(content_text)
+
+            if getattr(self, "stream", False):
+                text_output = [
+                    content_text.encode("utf-8") for content_text in content_texts_full
+                ]
+            else:
+                text_output = [
+                    content_text.encode("utf-8") for content_text in content_texts_full
+                ]
         else:
             prepend_prompt = ""
             if "prev_lens_text_output" not in request_output_state:
@@ -366,55 +465,8 @@ class GenerateRequest(RequestBase):
 
         # reasoning_output (OpenAI-style incremental/delta behavior)
         if getattr(self, "return_reasoning", False):
-            if "prev_lens_reasoning_output" not in request_output_state:
-                request_output_state["prev_lens_reasoning_output"] = [0] * len(
-                    request_output.outputs
-                )
-            prev_lens_reasoning = request_output_state["prev_lens_reasoning_output"]
-
-            reasoning_texts_full = []
-            for output in request_output.outputs:
-                reasoning_payload = getattr(output, "reasoning_output", None)
-                if not reasoning_payload:
-                    reasoning_payload = getattr(output, "reasoning", None)
-
-                if reasoning_payload is None or reasoning_payload == "":
-                    # Fallback: extract <think>...</think> from the full text.
-                    # NOTE: For chat-template prompts, the "<think>" tag is often
-                    # part of the rendered prompt (request_output.prompt), not part
-                    # of output.text. So we must scan the concatenated text.
-                    prompt_text = getattr(request_output, "prompt", "") or ""
-                    gen_text = getattr(output, "text", "") or ""
-                    full_text = prompt_text + gen_text
-
-                    start = full_text.find("<think>")
-                    if start >= 0:
-                        start += len("<think>")
-                        end = full_text.find("</think>", start)
-                        if end < 0:
-                            # Many templates don't emit the closing tag. Stop at a
-                            # common delimiter if present, else take until end.
-                            for delimiter in ("<final>", "</final>"):
-                                delimiter_pos = full_text.find(delimiter, start)
-                                if delimiter_pos >= 0:
-                                    end = delimiter_pos
-                                    break
-                        if end < 0:
-                            end = len(full_text)
-                        reasoning_text = full_text[start:end].lstrip("\n")
-                        reasoning_texts_full.append(reasoning_text)
-                    else:
-                        reasoning_texts_full.append("")
-                else:
-                    reasoning_texts_full.append(str(reasoning_payload))
             reasoning_output = [
-                reasoning_text[prev_len:].encode("utf-8")
-                for reasoning_text, prev_len in zip(
-                    reasoning_texts_full, prev_lens_reasoning
-                )
-            ]
-            request_output_state["prev_lens_reasoning_output"] = [
-                len(reasoning_text) for reasoning_text in reasoning_texts_full
+                reasoning_text.encode("utf-8") for reasoning_text in reasoning_texts_full
             ]
             output_tensors.append(
                 pb_utils.Tensor(
@@ -599,4 +651,3 @@ class EmbedRequest(RequestBase):
             )
 
         return pb_utils.InferenceResponse(output_tensors=output_tensors)
-

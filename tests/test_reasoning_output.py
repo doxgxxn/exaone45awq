@@ -280,6 +280,7 @@ def test_return_reasoning_tensor_is_merged_into_parameters():
         parameters,
         _additional_outputs,
         return_reasoning,
+        _enable_thinking,
     ) = gr._get_input_tensors()
 
     assert return_reasoning is True
@@ -358,6 +359,8 @@ def test_reasoning_output_is_incremental_and_encoded():
         tokenizer=None,
     )
     gr.return_reasoning = True
+    gr.stream = True
+    gr.enable_thinking = True
     gr.additional_outputs = {
         "return_finish_reason": False,
         "return_cumulative_logprob": False,
@@ -376,10 +379,7 @@ def test_reasoning_output_is_incremental_and_encoded():
     )
     resp1 = gr.create_response(out1, state, prepend_input=False)
     tensors1 = resp1.tensor_dict()
-    # When return_reasoning is enabled, the backend emits only the <final> block
-    # as text_output. Since this dummy output does not include <final>,
-    # text_output is empty.
-    assert tensors1["text_output"].tolist() == [b""]
+    assert tensors1["text_output"].tolist() == [b"Hello"]
     assert tensors1["reasoning_output"].tolist() == [b"THINK1"]
 
     out2 = DummyRequestOutput(
@@ -392,7 +392,7 @@ def test_reasoning_output_is_incremental_and_encoded():
     )
     resp2 = gr.create_response(out2, state, prepend_input=False)
     tensors2 = resp2.tensor_dict()
-    assert tensors2["text_output"].tolist() == [b""]
+    assert tensors2["text_output"].tolist() == [b" world"]
     assert tensors2["reasoning_output"].tolist() == [b" THINK2"]
 
 
@@ -413,6 +413,7 @@ def test_fallback_extracts_think_from_prompt_when_reasoning_fields_missing():
         tokenizer=None,
     )
     gr.return_reasoning = True
+    gr.enable_thinking = True
     gr.additional_outputs = {
         "return_finish_reason": False,
         "return_cumulative_logprob": False,
@@ -434,11 +435,57 @@ def test_fallback_extracts_think_from_prompt_when_reasoning_fields_missing():
     assert tensors["reasoning_output"].tolist() == [b"ABC"]
 
 
+def test_reasoning_parser_splits_content_and_reasoning():
+    _install_stub_modules()
+    sys.path.insert(0, "src")
+    request_mod = importlib.import_module("utils.request")
+
+    np = sys.modules["numpy"]
+
+    class FakeReasoningParser:
+        def extract_reasoning(self, model_output, request):
+            reasoning, _, content = model_output.partition("</think>")
+            return reasoning, content
+
+    req = DummyTritonRequest(inputs={"text_input": DummyInputTensor([b"prompt"])})
+
+    gr = request_mod.GenerateRequest(
+        req,
+        executor_callback=lambda *args, **kwargs: None,
+        output_dtype=np.object_,
+        logger=sys.modules["triton_python_backend_utils"].Logger,
+        tokenizer=None,
+    )
+    gr.return_reasoning = True
+    gr.stream = False
+    gr.enable_thinking = True
+    gr.reasoning_parser = FakeReasoningParser()
+    gr.additional_outputs = {
+        "return_finish_reason": False,
+        "return_cumulative_logprob": False,
+        "return_logprobs": False,
+        "return_num_input_tokens": False,
+        "return_num_output_tokens": False,
+    }
+
+    out = DummyRequestOutput(
+        prompt="prompt",
+        outputs=[DummySequenceOutput(text="reasoning</think>final")],
+        finished=True,
+        prompt_token_ids=[1],
+    )
+    resp = gr.create_response(out, {}, prepend_input=False)
+    tensors = resp.tensor_dict()
+    assert tensors["reasoning_output"].tolist() == [b"reasoning"]
+    assert tensors["text_output"].tolist() == [b"final"]
+
+
 def main() -> None:
     test_return_reasoning_tensor_is_merged_into_parameters()
     test_enable_thinking_renders_template_from_text_input()
     test_reasoning_output_is_incremental_and_encoded()
     test_fallback_extracts_think_from_prompt_when_reasoning_fields_missing()
+    test_reasoning_parser_splits_content_and_reasoning()
     print("OK")
 
 
