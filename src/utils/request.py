@@ -302,8 +302,23 @@ class GenerateRequest(RequestBase):
                 reasoning_payload = getattr(output, "reasoning_output", None)
                 if not reasoning_payload:
                     reasoning_payload = getattr(output, "reasoning", None)
-                if reasoning_payload is None:
-                    reasoning_texts_full.append("")
+
+                if reasoning_payload is None or reasoning_payload == "":
+                    # Fallback: extract <think>...</think> from the generated text.
+                    # This is important for models that only emit reasoning traces
+                    # inside the chat template (e.g. enable_thinking=True), where
+                    # vLLM may not populate `reasoning_output` for the raw generate API.
+                    text = getattr(output, "text", "") or ""
+                    start = text.find("<think>")
+                    if start >= 0:
+                        start += len("<think>")
+                        end = text.find("</think>", start)
+                        if end < 0:
+                            end = len(text)
+                        reasoning_text = text[start:end].lstrip("\n")
+                        reasoning_texts_full.append(reasoning_text)
+                    else:
+                        reasoning_texts_full.append("")
                 else:
                     reasoning_texts_full.append(str(reasoning_payload))
             reasoning_output = [
