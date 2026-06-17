@@ -174,7 +174,6 @@ class GenerateRequest(RequestBase):
         chat_template_kwargs = coerce_parameters_payload(
             parameters_dict.get("chat_template_kwargs"), self.logger
         )
-        self.chat_template_kwargs = chat_template_kwargs
 
         # OpenAI-style chat request support (messages -> rendered prompt).
         # NOTE: Triton HTTP /generate only supports scalar types inside `parameters`.
@@ -187,6 +186,12 @@ class GenerateRequest(RequestBase):
             if "enable_thinking" in parameters_dict
             else chat_template_kwargs.get("enable_thinking")
         )
+        if (
+            "enable_thinking" in parameters_dict
+            or "enable_thinking" in chat_template_kwargs
+        ):
+            chat_template_kwargs["enable_thinking"] = enable_thinking
+        self.chat_template_kwargs = chat_template_kwargs
 
         if messages is not None:
             if isinstance(messages, bytes):
@@ -271,7 +276,6 @@ class GenerateRequest(RequestBase):
             parameters,
             additional_outputs,
             return_reasoning,
-            enable_thinking,
         )
 
     async def execute(self):
@@ -282,7 +286,6 @@ class GenerateRequest(RequestBase):
             parameters,
             self.additional_outputs,
             self.return_reasoning,
-            self.enable_thinking,
         ) = self._get_input_tensors()
 
         sampling_params = TritonSamplingParams.from_dict(parameters, self.logger)
@@ -431,14 +434,9 @@ class GenerateRequest(RequestBase):
                 reasoning_texts_full.append(reasoning_text)
                 content_texts_full.append(content_text)
 
-            if getattr(self, "stream", False):
-                text_output = [
-                    content_text.encode("utf-8") for content_text in content_texts_full
-                ]
-            else:
-                text_output = [
-                    content_text.encode("utf-8") for content_text in content_texts_full
-                ]
+            text_output = [
+                content_text.encode("utf-8") for content_text in content_texts_full
+            ]
         else:
             prepend_prompt = ""
             if "prev_lens_text_output" not in request_output_state:

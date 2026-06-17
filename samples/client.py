@@ -94,7 +94,7 @@ class LLMClient:
         self, prompts, sampling_parameters, exclude_input_in_output
     ):
         # Clear results in between process_stream calls
-        self.results_dict = []
+        self._results_dict = {}
         success = True
         # Read response from the stream
         async for response in self.stream_infer(

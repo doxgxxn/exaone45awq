@@ -280,7 +280,6 @@ def test_return_reasoning_tensor_is_merged_into_parameters():
         parameters,
         _additional_outputs,
         return_reasoning,
-        _enable_thinking,
     ) = gr._get_input_tensors()
 
     assert return_reasoning is True
@@ -338,6 +337,42 @@ def test_enable_thinking_renders_template_from_text_input():
     assert prompt.startswith("<|user|>")
 
 
+def test_enable_thinking_false_is_normalized_for_parser():
+    _install_stub_modules()
+
+    sys.path.insert(0, "src")
+    request_mod = importlib.import_module("utils.request")
+
+    np = sys.modules["numpy"]
+
+    sampling_params = {
+        "enable_thinking": "false",
+        "chat_template_kwargs": json.dumps({"enable_thinking": True}),
+    }
+    req = DummyTritonRequest(
+        inputs={
+            "text_input": DummyInputTensor([b"hi"]),
+            "stream": DummyInputTensor([False]),
+            "exclude_input_in_output": DummyInputTensor([True]),
+            "sampling_parameters": DummyInputTensor(
+                [json.dumps(sampling_params).encode("utf-8")]
+            ),
+        }
+    )
+
+    gr = request_mod.GenerateRequest(
+        req,
+        executor_callback=lambda *args, **kwargs: None,
+        output_dtype=np.object_,
+        logger=sys.modules["triton_python_backend_utils"].Logger,
+        tokenizer=None,
+    )
+
+    prompt, *_rest = gr._get_input_tensors()
+    assert prompt == "hi"
+    assert gr.chat_template_kwargs["enable_thinking"] is False
+
+
 def test_reasoning_output_is_incremental_and_encoded():
     _install_stub_modules()
     sys.path.insert(0, "src")
@@ -360,7 +395,6 @@ def test_reasoning_output_is_incremental_and_encoded():
     )
     gr.return_reasoning = True
     gr.stream = True
-    gr.enable_thinking = True
     gr.additional_outputs = {
         "return_finish_reason": False,
         "return_cumulative_logprob": False,
@@ -413,7 +447,6 @@ def test_fallback_extracts_think_from_prompt_when_reasoning_fields_missing():
         tokenizer=None,
     )
     gr.return_reasoning = True
-    gr.enable_thinking = True
     gr.additional_outputs = {
         "return_finish_reason": False,
         "return_cumulative_logprob": False,
@@ -458,7 +491,6 @@ def test_reasoning_parser_splits_content_and_reasoning():
     )
     gr.return_reasoning = True
     gr.stream = False
-    gr.enable_thinking = True
     gr.reasoning_parser = FakeReasoningParser()
     gr.additional_outputs = {
         "return_finish_reason": False,
@@ -483,6 +515,7 @@ def test_reasoning_parser_splits_content_and_reasoning():
 def main() -> None:
     test_return_reasoning_tensor_is_merged_into_parameters()
     test_enable_thinking_renders_template_from_text_input()
+    test_enable_thinking_false_is_normalized_for_parser()
     test_reasoning_output_is_incremental_and_encoded()
     test_fallback_extracts_think_from_prompt_when_reasoning_fields_missing()
     test_reasoning_parser_splits_content_and_reasoning()
