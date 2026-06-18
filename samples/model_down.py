@@ -10,7 +10,7 @@ if not hf_token:
 snapshot_download(
     repo_id="LGAI-EXAONE/EXAONE-4.5-33B-AWQ",
     revision="main",
-    local_dir="/tmp/vllm_backend/samples/model_repository/exaon4_5_awq", # 작성 ..
+    local_dir="/tmp/vllm_backend/samples/model_repository/exaone4_5_awq/1", # 작성 ..
     local_dir_use_symlinks=False,
     token=os.getenv("HF_TOKEN"),
     allow_patterns=[
@@ -22,7 +22,6 @@ snapshot_download(
         "model.safetensors.index.json",
         "preprocessor_config.json",
         "processor_config.json",
-        "assets/*",
     ],
 )
 
