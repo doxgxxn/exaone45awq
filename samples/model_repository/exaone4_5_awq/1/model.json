@@ -1,5 +1,5 @@
 {
-  "model": "/tmp/vllm_backend/samples/model_repository/exaone4_5_awq",
+  "model": "/tmp/vllm_backend/samples/model_repository/exaone4_5_awq/1",
   "quantization": "compressed-tensors",
   "trust_remote_code": true,
   "tensor_parallel_size": 1,
