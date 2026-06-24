@@ -24,6 +24,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import inspect
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -79,6 +80,7 @@ def _coerce_sampling_parameter_types(params_dict: Dict[str, Any]) -> Dict[str, A
         "min_tokens",
         "n",
         "seed",
+        "thinking_token_budget",
         "top_k",
     }
     float_params = {
@@ -101,6 +103,38 @@ def _coerce_sampling_parameter_types(params_dict: Dict[str, Any]) -> Dict[str, A
         if isinstance(value, str) and value.strip().lower() not in ("", "none", "null"):
             coerced[key] = float(value)
     return coerced
+
+
+def _constructor_kwargs(cls: Any) -> tuple[set[str], bool]:
+    try:
+        signature = inspect.signature(cls)
+    except (TypeError, ValueError):
+        return set(getattr(cls, "__annotations__", {}).keys()), False
+
+    names = set()
+    accepts_kwargs = False
+    for name, parameter in signature.parameters.items():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            accepts_kwargs = True
+        elif parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            names.add(name)
+    names.discard("self")
+    return names, accepts_kwargs
+
+
+def _filter_constructor_kwargs(
+    cls: Any, kwargs: Dict[str, Any]
+) -> tuple[Dict[str, Any], set[str]]:
+    names, accepts_kwargs = _constructor_kwargs(cls)
+    if accepts_kwargs or not names:
+        return dict(kwargs), set()
+    return (
+        {key: value for key, value in kwargs.items() if key in names},
+        set(kwargs) - names,
+    )
 
 
 class TritonSamplingParams(SamplingParams):
@@ -166,6 +200,16 @@ class TritonSamplingParams(SamplingParams):
                 )
             params_dict = _coerce_sampling_parameter_types(params_dict)
 
+            # These fields are consumed by the Triton/OpenAI-style frontend layer.
+            # Passing them to vLLM SamplingParams would either raise or force the
+            # fallback path to drop otherwise valid sampling parameters.
+            for backend_only_key in (
+                "messages",
+                "enable_thinking",
+                "chat_template_kwargs",
+            ):
+                params_dict.pop(backend_only_key, None)
+
             structured_outputs_cfg = params_dict.get("structured_outputs")
             if structured_outputs_cfg is not None:
                 structured_outputs_cfg = coerce_parameters_payload(
@@ -179,20 +223,50 @@ class TritonSamplingParams(SamplingParams):
             reasoning_cfg = params_dict.get("reasoning")
             if reasoning_cfg is not None:
                 reasoning_cfg = coerce_parameters_payload(reasoning_cfg, logger)
-                if reasoning_cfg and "enable" in reasoning_cfg and not reasoning_cfg.get(
-                    "enable", True
-                ):
+                reasoning_enabled = _normalize_bool(reasoning_cfg.pop("enable", True))
+                if not reasoning_enabled:
                     # When reasoning is explicitly disabled we simply remove the block to
                     # avoid passing unnecessary structures to older vLLM versions.
                     params_dict.pop("reasoning", None)
-                elif reasoning_cfg and ReasoningParams is not None:
-                    params_dict["reasoning"] = ReasoningParams(**reasoning_cfg)
-                elif reasoning_cfg:
-                    logger.log_warn(
-                        "[vllm] Reasoning parameters provided, but this vLLM version does "
-                        "not expose `ReasoningParams`. Ignoring reasoning configuration."
+                else:
+                    sampling_param_names, sampling_accepts_kwargs = _constructor_kwargs(
+                        SamplingParams
                     )
-                    params_dict.pop("reasoning", None)
+                    if (
+                        "budget_tokens" in reasoning_cfg
+                        and "thinking_token_budget" not in params_dict
+                        and (
+                            sampling_accepts_kwargs
+                            or "thinking_token_budget" in sampling_param_names
+                        )
+                    ):
+                        params_dict["thinking_token_budget"] = reasoning_cfg.pop(
+                            "budget_tokens"
+                        )
+
+                    if reasoning_cfg and ReasoningParams is not None:
+                        reasoning_kwargs, dropped_keys = _filter_constructor_kwargs(
+                            ReasoningParams, reasoning_cfg
+                        )
+                        if dropped_keys:
+                            logger.log_warn(
+                                "[vllm] Dropped unsupported reasoning parameters: "
+                                f"{sorted(dropped_keys)}"
+                            )
+                        if reasoning_kwargs:
+                            params_dict["reasoning"] = ReasoningParams(
+                                **reasoning_kwargs
+                            )
+                        else:
+                            params_dict.pop("reasoning", None)
+                    elif reasoning_cfg:
+                        logger.log_warn(
+                            "[vllm] Reasoning parameters provided, but this vLLM version does "
+                            "not expose `ReasoningParams`. Ignoring reasoning configuration."
+                        )
+                        params_dict.pop("reasoning", None)
+                    else:
+                        params_dict.pop("reasoning", None)
 
             init_kwargs = dict(params_dict)
             lora_name = init_kwargs.pop("lora_name", None)
@@ -201,10 +275,9 @@ class TritonSamplingParams(SamplingParams):
             try:
                 sampling_params = TritonSamplingParams(**init_kwargs)
             except TypeError as exc:
-                known_fields = set(SamplingParams.__annotations__.keys())
-                filtered_kwargs = {
-                    key: value for key, value in init_kwargs.items() if key in known_fields
-                }
+                filtered_kwargs, _ = _filter_constructor_kwargs(
+                    SamplingParams, init_kwargs
+                )
                 logger.log_warn(
                     "[vllm] Dropped unsupported sampling parameters while creating "
                     f"`TritonSamplingParams`: {exc}"

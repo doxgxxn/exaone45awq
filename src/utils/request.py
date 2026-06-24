@@ -251,6 +251,11 @@ class GenerateRequest(RequestBase):
                 reasoning_cfg = coerce_parameters_payload(reasoning_cfg, self.logger)
                 reasoning_cfg.setdefault("enable", True)
                 parameters_dict["reasoning"] = reasoning_cfg
+
+        # These are frontend/backend control fields, not vLLM SamplingParams.
+        # Keep them out of AsyncLLM.generate() after they have been consumed above.
+        for backend_only_key in ("messages", "enable_thinking", "chat_template_kwargs"):
+            parameters_dict.pop(backend_only_key, None)
         parameters = parameters_dict
 
         # additional outputs

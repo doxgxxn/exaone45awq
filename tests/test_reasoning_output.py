@@ -335,6 +335,7 @@ def test_enable_thinking_renders_template_from_text_input():
     prompt, *_rest = gr._get_input_tensors()
     assert isinstance(prompt, str)
     assert prompt.startswith("<|user|>")
+    assert "enable_thinking" not in _rest[2]
 
 
 def test_enable_thinking_false_is_normalized_for_parser():
@@ -371,6 +372,8 @@ def test_enable_thinking_false_is_normalized_for_parser():
     prompt, *_rest = gr._get_input_tensors()
     assert prompt == "hi"
     assert gr.chat_template_kwargs["enable_thinking"] is False
+    assert "enable_thinking" not in _rest[2]
+    assert "chat_template_kwargs" not in _rest[2]
 
 
 def test_reasoning_output_is_incremental_and_encoded():
