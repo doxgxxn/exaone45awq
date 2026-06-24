@@ -1,2 +1,15 @@
 .venv/
 .playwright-mcp/
+.build/
+*.tar
+*.sif
+samples/model_repository/exaone4_5_awq/1/config.json
+samples/model_repository/exaone4_5_awq/1/tokenizer.json
+samples/model_repository/exaone4_5_awq/1/tokenizer_config.json
+samples/model_repository/exaone4_5_awq/1/chat_template.jinja
+samples/model_repository/exaone4_5_awq/1/model-*.safetensors
+samples/model_repository/exaone4_5_awq/1/model.safetensors.index.json
+samples/model_repository/exaone4_5_awq/1/preprocessor_config.json
+samples/model_repository/exaone4_5_awq/1/processor_config.json
+samples/model_repository/exaone4_5_awq/1/.cache/
+samples/model_repository/exaone4_5_awq/1/.locks/
