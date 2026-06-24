@@ -9,9 +9,12 @@ Run the commands below inside a Triton Server container on VastAI. Set
 `HF_TOKEN` to a Hugging Face token that can access the EXAONE model repository.
 
 ```bash
+export HF_TOKEN="hf_xxx"
+```
+---
+```bash
 set -euo pipefail
 
-export HF_TOKEN="hf_xxx"
 test -n "$HF_TOKEN"
 
 apt-get update
