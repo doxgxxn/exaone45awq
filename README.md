@@ -25,6 +25,7 @@ Set your Hugging Face token first:
 
 ```bash
 export HF_TOKEN="hf_xxx"
+FLASHINFER_DISABLE_VERSION_CHECK=1
 ```
 
 Then install and run:
