@@ -153,10 +153,62 @@ Do not bake `HF_TOKEN` into the image. Use it only during the online download or
 build step. Public redistribution of model weights or NGC-derived images may be
 restricted by their respective licenses and terms.
 
-## Troubleshooting
+```bash
 
-- `HF_TOKEN` must be set and must have access to `LGAI-EXAONE/EXAONE-4.5-33B-AWQ`.
-- Model files must exist under `samples/model_repository/exaone4_5_awq/1` before running offline.
-- `samples/model_repository/exaone4_5_awq/1/model.json` must point to `/tmp/vllm_backend/samples/model_repository/exaone4_5_awq/1` for the VastAI clone flow.
-- `scripts/build_docker_image.sh` patches the generated Docker build context to use `/workspace/vllm_backend/samples/model_repository/exaone4_5_awq/1` inside the image.
-- If model loading runs out of memory, lower `max_model_len` or `gpu_memory_utilization` in `model.json`.
+
+TORCH_NVSHMEM_DISABLE=1 \
+FLASHINFER_DISABLE_VERSION_CHECK=1 \
+tritonserver --model-repository /tmp/vllm_backend/samples/model_repository
+
+
+
+curl -X POST http://localhost:8000/v2/models/exaone4_5_awq/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+        "text_input": "싸이는 어떤 가수야?",
+        "parameters": {
+          "stream": false,
+          "return_reasoning": true,
+          "enable_thinking": true,
+          "temperature": 0.8,
+          "top_p": 0.95,
+          "max_tokens": 5000
+        }
+      }'
+
+
+
+
+HF_HOME=/tmp/hf_cache \
+FLASHINFER_DISABLE_VERSION_CHECK=1 \
+TORCH_NVSHMEM_DISABLE=1 \
+vllm serve \
+  /tmp/vllm_backend/samples/model_repository/exaone4_5_awq/1 \
+  --served-model-name exaon4_5_awq \
+  --tensor-parallel-size 1 \
+  --dtype bfloat16 \
+  --max-model-len 160000 \
+  --port 9000 \
+  --host 0.0.0.0 \
+  --quantization compressed-tensors \
+  --trust-remote-code \
+  --reasoning-parser qwen3 \
+  --limit-mm-per-prompt '{"image": 64}'
+
+
+
+curl -X POST http://localhost:9000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "exaon4_5_awq",
+        "messages": [
+          {"role": "user", "content": "싸이는 어떤 가수야?"}
+        ],
+        "max_tokens": 5000,
+        "temperature": 0.8,
+        "stream": false,
+        "top_p": 0.95,        
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        }
+      }'
