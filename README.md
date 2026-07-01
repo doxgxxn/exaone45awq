@@ -24,13 +24,13 @@ compatible Triton Server image on VastAI.
 Set your Hugging Face token first:
 
 ```bash
-export HF_TOKEN="hf_xxx"
-FLASHINFER_DISABLE_VERSION_CHECK=1
+export HF_TOKEN=
 ```
 
 Then install and run:
 
 ```bash
+FLASHINFER_DISABLE_VERSION_CHECK=1
 set -euo pipefail
 
 test -n "$HF_TOKEN" || { echo "HF_TOKEN is required"; exit 1; }
