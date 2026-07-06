@@ -1,0 +1,18 @@
+name: "gemma4_31b_it"
+backend: "vllm"
+
+max_batch_size: 0
+
+instance_group [
+  {
+    kind: KIND_MODEL
+    count: 1
+  }
+]
+
+parameters: {
+  key: "REPORT_CUSTOM_METRICS"
+  value: {
+    string_value: "true"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "model": "/tmp/vllm_backend/samples/model_repository/gemma4_31b_it/1",
+  "trust_remote_code": true,
+  "tensor_parallel_size": 1,
+  "max_model_len": 16000,
+  "gpu_memory_utilization": 0.85
+}

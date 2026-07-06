@@ -15,9 +15,12 @@ cp -R "$REPO_ROOT/src" "$CONTEXT_DIR/src"
 cp -R "$REPO_ROOT/scripts" "$CONTEXT_DIR/scripts"
 cp -R "$REPO_ROOT/samples" "$CONTEXT_DIR/samples"
 
-MODEL_JSON="$CONTEXT_DIR/samples/model_repository/exaone4_5_awq/1/model.json"
-MODEL_PATH="/workspace/vllm_backend/samples/model_repository/exaone4_5_awq/1"
-MODEL_JSON="$MODEL_JSON" MODEL_PATH="$MODEL_PATH" python - <<'PY'
+shopt -s nullglob
+
+for MODEL_JSON in "$CONTEXT_DIR"/samples/model_repository/*/1/model.json; do
+  MODEL_NAME="$(basename "$(dirname "$(dirname "$MODEL_JSON")")")"
+  MODEL_PATH="/workspace/vllm_backend/samples/model_repository/$MODEL_NAME/1"
+  MODEL_JSON="$MODEL_JSON" MODEL_PATH="$MODEL_PATH" python - <<'PY'
 import json
 import os
 
@@ -29,6 +32,7 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PY
+done
 
 cat > "$BUILD_DIR/Dockerfile.generated" <<'DOCKERFILE'
 ARG BASE_IMAGE
@@ -47,21 +51,25 @@ CMD ["/workspace/vllm_backend/scripts/run_triton.sh"]
 DOCKERFILE
 
 if [[ "$INCLUDE_MODEL" == "1" ]]; then
-  test -f "$CONTEXT_DIR/samples/model_repository/exaone4_5_awq/1/config.json"
-  test -f "$CONTEXT_DIR/samples/model_repository/exaone4_5_awq/1/tokenizer.json"
   echo "building image with local model files included"
 else
-  MODEL_DIR="$CONTEXT_DIR/samples/model_repository/exaone4_5_awq/1"
-  rm -f "$MODEL_DIR"/config.json
-  rm -f "$MODEL_DIR"/tokenizer.json
-  rm -f "$MODEL_DIR"/tokenizer_config.json
-  rm -f "$MODEL_DIR"/chat_template.jinja
-  rm -f "$MODEL_DIR"/model-*.safetensors
-  rm -f "$MODEL_DIR"/model.safetensors.index.json
-  rm -f "$MODEL_DIR"/preprocessor_config.json
-  rm -f "$MODEL_DIR"/processor_config.json
-  rm -rf "$MODEL_DIR"/.cache
-  rm -rf "$MODEL_DIR"/.locks
+  for MODEL_DIR in "$CONTEXT_DIR"/samples/model_repository/*/1; do
+    rm -f "$MODEL_DIR"/*.py
+    rm -f "$MODEL_DIR"/config.json
+    rm -f "$MODEL_DIR"/generation_config.json
+    rm -f "$MODEL_DIR"/tokenizer.json
+    rm -f "$MODEL_DIR"/tokenizer.model
+    rm -f "$MODEL_DIR"/tokenizer_config.json
+    rm -f "$MODEL_DIR"/special_tokens_map.json
+    rm -f "$MODEL_DIR"/chat_template.jinja
+    rm -f "$MODEL_DIR"/model.safetensors
+    rm -f "$MODEL_DIR"/model-*.safetensors
+    rm -f "$MODEL_DIR"/model.safetensors.index.json
+    rm -f "$MODEL_DIR"/preprocessor_config.json
+    rm -f "$MODEL_DIR"/processor_config.json
+    rm -rf "$MODEL_DIR"/.cache
+    rm -rf "$MODEL_DIR"/.locks
+  done
   echo "building runtime image without model weights"
 fi
 

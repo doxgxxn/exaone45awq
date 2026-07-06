@@ -1,0 +1,18 @@
+name: "exaone4_5_33b"
+backend: "vllm"
+
+max_batch_size: 0
+
+instance_group [
+  {
+    kind: KIND_MODEL
+    count: 1
+  }
+]
+
+parameters: {
+  key: "REPORT_CUSTOM_METRICS"
+  value: {
+    string_value: "true"
+  }
+}
