@@ -235,6 +235,8 @@ vllm serve \
   --max-model-len 16000 \
   --host 0.0.0.0 \
   --port 9002 \
+  --limit-mm-per-prompt '{"image":64}' \
+  --max-num-batched-tokens 4096 \
   --trust-remote-code
 ```
 
